@@ -1,4 +1,4 @@
-from parcels import AdvectionRK4, Field, Fieldset, JITParticle, ScipyParticle 
+from parcels import AdvectionRK4, Field, FieldSet, JITParticle, ScipyParticle 
 from parcels import ParticleFile, ParticleSet, Variable, VectorField, ErrorCode
 from datetime import timedelta as delta
 from os import path
@@ -17,9 +17,8 @@ from operator import attrgetter
 ########################### DATA INPUT ######################################
 
 #variables
-withstokes = False 
-withwind = 0.01 #scaling factor
-####add in interpolation options later
+withstokes = True 
+withwind = False #scaling factor
 
 #data input
 data_in_waves = "/projects/0/topios/hydrodynamic_data/WaveWatch3data/CFSR"
@@ -33,7 +32,7 @@ galapagos_domain = [-94, -87, -3.5, 3]
 seeding_distance = 1 #unit: lon/lat degree (till which distance from islands we seed particles)
 seeding_resolution = 4 #unit: gridpoints (horizontal resolution of seeding)
 seeding_frequency = 5 #unit: days (how often do we seed particles)
-advection_duration = 90 #unit: days (how long does one particle advect in the fields)
+advection_duration = 10 #unit: days (how long does one particle advect in the fields)
 output_frequency = 6 #unit: hours
 length_simulation = 4*365 #unit: days (how long are we seeding particles)
 
@@ -66,28 +65,8 @@ seaborder_map = data_seaborder['seaborder']
 
 ##################### ADD FIELDS ##############################################
 
-##### ERIK
-if withstokes:
-    stokesfiles = glob('global-analysis-forecast-wav-001-027_1567578677407.nc')
-    stokesdimensions = {'lat': 'latitude', 'lon': 'longitude', 'time': 'time'}
-    stokesvariables = {'U': 'VSDX', 'V': 'VSDY'}
-    fset_stokes = FieldSet.from_netcdf(stokesfiles, stokesvariables, stokesdimensions)
-    fset_stokes.add_periodic_halo(zonal=True)
-    filename_out += '_wstokes'
+### add MITgcm field
 
-if withwind:
-    windfiles = sorted(glob('WIND_GLO_WIND_L4_NRT_OBSERVATIONS_012_004/2019/*.nc'))
-    winddimensions = {'lat': 'lat', 'lon': 'lon', 'time': 'time'}
-    windvariables = {'U': 'eastward_wind', 'V': 'northward_wind'}
-    fset_wind = FieldSet.from_netcdf(windfiles, windvariables, winddimensions)
-    fset_wind.add_periodic_halo(zonal=True)
-    fset_wind.U.set_scaling_factor(withwind)
-    fset_wind.V.set_scaling_factor(withwind)
-    filename_out += '_wind%.4d' % (withwind * 1000)
-######
-
-
-# add MITgcm field
 varfiles = sorted(glob(data_in_mit + "/RGEMS_20*.nc"))
 meshfile = glob(data_in_mit+"/RGEMS3_Surf_grid.nc")
 files_MITgcm = {'U': {'lon': meshfile, 'lat': meshfile, 'data': varfiles},
@@ -95,18 +74,56 @@ files_MITgcm = {'U': {'lon': meshfile, 'lat': meshfile, 'data': varfiles},
 variables_MITgcm = {'U': 'UVEL', 'V': 'VVEL'}
 dimensions_MITgcm = {'lon': 'XG', 'lat': 'YG', 'time': 'time'}
 indices_MITgcm = {'lon': range(ix_min,ix_max), 'lat': range(iy_min,iy_max)}
-
 fieldset_MITgcm = FieldSet.from_mitgcm(files_MITgcm,
                                        variables_MITgcm, 
                                        dimensions_MITgcm, 
-                                       indices = indices_MITgcm,)
+                                       indices = indices_MITgcm)
 fieldset = fieldset_MITgcm
 
-# add unbeaching field
+### Add waves and wind
 
-file_UnBeach = 'UnbeachingUV.nc'
-variables_UnBeach = {'U_unbeach': 'unBeachU',
-                     'V_unbeach': 'unBeachV'}
+if withstokes:
+    files_stokes = sorted(glob(data_in_waves + "/WW3-GLOB-30M_200[8-9]*_uss.nc"))
+    files_stokes += sorted(glob(data_in_waves + "/WW3-GLOB-30M_201[0-2]*_uss.nc"))
+    #variables_stokes = {'U_waves': 'uuss', 'V_waves': 'vuss'}
+    dimensionsU = {'lon': 'longitude', 'lat': 'latitude', 'time': 'time'} 
+    dimensionsV = {'lon': 'longitude', 'lat': 'latitude', 'time': 'time'}
+    indices_stokes = {'lon': range(120, 220), 'lat': range(142, 170)}
+    U_waves = Field.from_netcdf(files_stokes, ('U_waves', 'uuss'), 
+                                dimensionsU, indices=indices_stokes,
+                                fieldtype='U', allow_time_extrapolation=False)
+    V_waves = Field.from_netcdf(files_stokes, ('V_waves', 'vuss'), 
+                                dimensionsV, fieldtype='V', allow_time_extrapolation=False, indices=indices_stokes,
+                                grid=U_waves.grid, dataFiles=U_waves.dataFiles)
+    fieldset.add_field(U_waves)
+    fieldset.add_field(V_waves)
+    uv_waves = VectorField('UVwaves', fieldset.U_waves, fieldset.V_waves)
+    fieldset.add_vector_field(uv_waves)
+    filename_out += '_wstokes'
+
+
+if withwind:
+    files_wind = sorted(glob(data_in_wind + "/200[8-9]*-fv1.0.nc"))
+    files_wind += sorted(glob(data_in_wind + "/201[0-2]*-fv1.0.nc"))
+    variables_wind = {'U_wind': 'eastward_wind', 'V_wind': 'northward_wind'}
+    dimensions_wind = {'lon': 'lon', 'lat': 'lat', 'time': 'time'}
+    indices_wind = {'lon': range(300, 400), 'lat': range(290, 345)}   
+    fieldset_wind = FieldSet.from_netcdf(files_wind,
+                                         variables_wind,
+                                         dimensions_wind,
+                                         indices=indices_wind)
+    fieldset_wind.U_wind.set_scaling_factor(withwind)
+    fieldset_wind.V_wind.set_scaling_factor(withwind)
+    fieldset.add_field(fieldset_wind.U_wind)
+    fieldset.add_field(fieldset_wind.V_wind)
+    uv_wind = VectorField('UVwind', fieldset.U_wind, fieldset.V_wind)
+    fieldset.add_vector_field(uv_wind)
+    filename_out += '_wind%.4d' % (withwind * 1000)      
+    
+### add unbeaching field
+
+file_UnBeach = 'unbeachingUV.nc'
+variables_UnBeach = {'U_unbeach': 'unBeachU', 'V_unbeach': 'unBeachV'}
 dimensions_UnBeach = {'lon': 'XG', 'lat': 'YG'}
 fieldset_UnBeach = FieldSet.from_c_grid_dataset(file_UnBeach, 
                                                 variables_UnBeach,
@@ -115,11 +132,10 @@ fieldset_UnBeach = FieldSet.from_c_grid_dataset(file_UnBeach,
                                                 tracer_interp_method='cgrid_velocity')
 fieldset.add_field(fieldset_UnBeach.U_unbeach)
 fieldset.add_field(fieldset_UnBeach.V_unbeach)
+uv_unbeach = VectorField('UVunbeach', fieldset.U_unbeach, fieldset.V_unbeach)
+fieldset.add_vector_field(uv_unbeach)
 
-UVunbeach = VectorField('UVunbeach', fieldset.U_unbeach, fieldset.V_unbeach)
-fieldset.add_vector_field(UVunbeach)
-
-# add distance and seaborder map
+### add distance and seaborder map
 
 fieldset.add_field(Field('distance', 
                          data = distance_map,
@@ -183,31 +199,49 @@ def AdvectionRK4(particle, fieldset, time):
         particle.beached = 2
         
 def BeachTesting(particle, fieldset, time):
-    if particle.beached == 2:
+    if particle.beached == 2 or particle.beached == 3:
         (u, v) = fieldset.UV[time, particle.depth, particle.lat, particle.lon]
         particle.uvel = u
         particle.vvel = v
         if fabs(u) < 1e-14 and fabs(v) < 1e-14:
-            particle.beached = 1
+            if particle.beached == 2:
+                particle.beached = 4
+            else:
+                particle.beached = 1
+        elif fabs(u) == 0 and fabs(v) < 1e-9:
+            if particle.beached == 2:
+                particle.beached = 4
+            else:
+                particle.beached = 1
+        elif fabs(u) < 1e-9 and fabs(v) == 0:
+            if particle.beached == 2:
+                particle.beached = 4
+            else:
+                particle.beached = 1
         else:
             particle.beached = 0
 
 def UnBeaching(particle, fieldset, time):
-    if particle.beached == 1:
+    if particle.beached == 4:
         (ub, vb) = fieldset.UVunbeach[time, particle.depth, particle.lat, particle.lon]
         particle.lon += ub * particle.dt * 400/particle.dt
         particle.lat += vb * particle.dt * 400/particle.dt
         particle.beached = 0
         particle.unbeachCount += 1
 
-def UnBeaching2(particle, fieldset, time):
-    if particle.beached == 1:
-        particle.lon = particle.prevlon
-        particle.lat = particle.prevlat
-        particle.beached = 0
-        particle.unbeachCount += 1
-    particle.prevlon = particle.lon
-    particle.prevlat = particle.lat
+def StokesDrag(particle, fieldset, time):
+    if particle.beached == 0:
+        (u_waves, v_waves) = fieldset.UVwaves[time, particle.depth, particle.lat, particle.lon]
+        particle.lon += u_waves * particle.dt
+        particle.lat += v_waves * particle.dt
+        particle.beached = 3
+
+def WindDrag(particle, fieldset, time):
+    if particle.beached == 0:
+        (u_wind, v_wind) = fieldset.UVwind[time, particle.depth, particle.lat, particle.lon]
+        particle.lon += u_wind * particle.dt
+        particle.lat += v_wind * particle.dt
+        particle.beached = 3
         
 def Age(fieldset, particle, time):
     particle.age = particle.age + math.fabs(particle.dt)
@@ -223,15 +257,12 @@ def DeleteParticle(particle, fieldset, time):
       
 class GalapagosParticle(JITParticle):
     age = Variable('age', dtype=np.float32, initial = 0.)
-    beached = Variable('beached', dtype=np.int32, to_write=False, initial = 0.)
     unbeachCount = Variable('unbeachCount', dtype=np.int32, initial = 0.)
     distance = Variable('distance', dtype=np.float32, initial = 0.)
     island = Variable('island', dtype=np.int32, initial = 0.)
-    prevlon = Variable('prevlon', dtype=np.float32, to_write=False, initial = attrgetter('lon'))
-    prevlat = Variable('prevlat', dtype=np.float32, to_write=False, initial = attrgetter('lat'))
-    vvel = Variable('vvel', dtype=np.float32, initial = 0.)
-    uvel = Variable('uvel', dtype=np.float32, initial = 0.)
-    
+    vvel = Variable('vvel', dtype=np.float32, to_write=False, initial = 0.)
+    uvel = Variable('uvel', dtype=np.float32, to_write=False, initial = 0.)
+    beached = Variable('beached', dtype=np.int32, to_write=True, initial = 0.)
 
 ######################## EXECUTE #########################################################
 
@@ -241,16 +272,16 @@ pset = ParticleSet(fieldset=fieldset,
                    lat=startlat,
                    repeatdt=delta(days=seeding_frequency))
 
-beaching_kernel = 'usingUV'
-kernel = pset.Kernel(AdvectionRK4) + pset.Kernel(BeachTesting)
-if beaching_kernel == 'usingUV':
-    kernel += pset.Kernel(UnBeaching) 
-    fname = path.join(data_out, filename_out + "_Test.nc") 
-else:
-    kernel += pset.Kernel(UnBeaching2)
-    fname = path.join(data_out, filename_out + "_PrevPosition.nc") 
-kernel += pset.Kernel(SampleInfo) + pset.Kernel(Age)
-  
+kernel = (pset.Kernel(AdvectionRK4) +
+          pset.Kernel(BeachTesting) + 
+          pset.Kernel(UnBeaching))
+if withstokes:
+    kernel += pset.Kernel(StokesDrag) + pset.Kernel(BeachTesting)
+if withwind:
+    kernel += pset.Kernel(WindDrag) + pset.Kernel(BeachTesting)
+kernel += pset.Kernel(Age) + pset.Kernel(SampleInfo)
+
+fname = path.join(data_out, filename_out + ".nc") 
 outfile = pset.ParticleFile(name=fname, outputdt=delta(hours=output_frequency))
 
 #pset.execute(kernel,
